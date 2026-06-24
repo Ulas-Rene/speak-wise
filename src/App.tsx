@@ -42,19 +42,19 @@ const VOICE_QUALITY_SETTINGS: Record<
 > = {
   stable: {
     label: "Stabil",
-    bitrate: 32000,
+    bitrate: 48000,
     sampleRate: 48000,
-    dtx: true,
+    dtx: false,
   },
   balanced: {
     label: "Dengeli",
-    bitrate: 64000,
+    bitrate: 80000,
     sampleRate: 48000,
-    dtx: true,
+    dtx: false,
   },
   quality: {
     label: "Kaliteli",
-    bitrate: 96000,
+    bitrate: 128000,
     sampleRate: 48000,
     dtx: false,
   },
@@ -97,14 +97,16 @@ const getAudioConstraints = (
   voiceQualityProfile: VoiceQualityProfile,
   deviceMode: "ideal" | "exact" = "ideal"
 ): MediaTrackConstraints => {
-  const processingEnabled = noiseSuppressionLevel !== "off";
+  const echoCancellationEnabled = noiseSuppressionLevel !== "off";
+  const noiseSuppressionEnabled = noiseSuppressionLevel === "medium" || noiseSuppressionLevel === "high";
+  const autoGainControlEnabled = noiseSuppressionLevel === "high";
   const qualitySettings = VOICE_QUALITY_SETTINGS[voiceQualityProfile];
 
   return {
     ...(selectedMicId ? { deviceId: { [deviceMode]: selectedMicId } } : {}),
-    echoCancellation: processingEnabled,
-    noiseSuppression: processingEnabled,
-    autoGainControl: noiseSuppressionLevel === "medium" || noiseSuppressionLevel === "high",
+    echoCancellation: echoCancellationEnabled,
+    noiseSuppression: noiseSuppressionEnabled,
+    autoGainControl: autoGainControlEnabled,
     channelCount: 1,
     sampleRate: qualitySettings.sampleRate,
     sampleSize: 16,
@@ -581,11 +583,13 @@ export default function App() {
             const fmtp = [
               codec.sdpFmtpLine,
               `maxaveragebitrate=${qualitySettings.bitrate}`,
+              "maxplaybackrate=48000",
               "useinbandfec=1",
               `usedtx=${qualitySettings.dtx ? 1 : 0}`,
             ]
               .filter(Boolean)
-              .join(";");
+              .join(";")
+              .replace(/;+/g, ";");
 
             return {
               ...codec,
@@ -1555,6 +1559,9 @@ export default function App() {
                       </button>
                     ))}
                   </div>
+                  <p className="mt-2 text-[11px] leading-relaxed text-gray-600">
+                    Ses kesiliyorsa Az ya da Orta kullan. Çok modu dip sesi azaltır ama bazı mikrofonlarda konuşmayı kırpabilir.
+                  </p>
                 </div>
 
                 <div>
@@ -1588,7 +1595,7 @@ export default function App() {
                     ))}
                   </div>
                   <p className="mt-2 text-[11px] leading-relaxed text-gray-600">
-                    Kaliteli mod daha net ses verir; Stabil mod zayıf bağlantıda kesilmeyi azaltır.
+                    Kaliteli mod daha net ses verir. Stabil mod zayıf bağlantıda daha kontrollü bant genişliği kullanır.
                   </p>
                 </div>
 
@@ -1600,9 +1607,15 @@ export default function App() {
                     </span>
                   </div>
                   <div className="mt-2 flex items-center justify-between text-xs">
-                    <span className="font-semibold text-gray-300">Otomatik ses dengesi</span>
+                    <span className="font-semibold text-gray-300">Gürültü filtreleme</span>
                     <span className={noiseSuppressionLevel === "medium" || noiseSuppressionLevel === "high" ? "text-emerald-400" : "text-gray-500"}>
                       {noiseSuppressionLevel === "medium" || noiseSuppressionLevel === "high" ? "Açık" : "Kapalı"}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between text-xs">
+                    <span className="font-semibold text-gray-300">Otomatik ses dengesi</span>
+                    <span className={noiseSuppressionLevel === "high" ? "text-emerald-400" : "text-gray-500"}>
+                      {noiseSuppressionLevel === "high" ? "Açık" : "Kapalı"}
                     </span>
                   </div>
                 </div>
