@@ -9,15 +9,13 @@ import {
   MessageSquare, 
   LogOut, 
   Hash, 
-  User, 
   Volume2, 
   VolumeX, 
-  Radio, 
   Smile, 
-  Sparkles,
   Crown,
   Settings,
-  X
+  X,
+  MessageCircle
 } from "lucide-react";
 import { User as UserType, Message } from "./types";
 
@@ -124,16 +122,17 @@ export default function App() {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [isMuted, setIsMuted] = useState(false);
   const [inputText, setInputText] = useState("");
-  const [activeChannel, setActiveChannel] = useState("genel");
   const [isTalking, setIsTalking] = useState(false); // local voice volume activity detector
   const [roomKey, setRoomKey] = useState("");
   const [roomKeyRequired, setRoomKeyRequired] = useState(false);
+  const [configLoaded, setConfigLoaded] = useState(false);
   const [joinError, setJoinError] = useState("");
   const [isJoining, setIsJoining] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedMicId, setSelectedMicId] = useState("");
   const [noiseSuppressionLevel, setNoiseSuppressionLevel] = useState<NoiseSuppressionLevel>("medium");
+  const autoJoinAttemptedRef = useRef(false);
 
   // Refs
   const socketRef = useRef<Socket | null>(null);
@@ -154,8 +153,16 @@ export default function App() {
     fetch("/api/config")
       .then((response) => response.json())
       .then((config) => setRoomKeyRequired(Boolean(config.roomKeyRequired)))
-      .catch(() => setRoomKeyRequired(false));
+      .catch(() => setRoomKeyRequired(false))
+      .finally(() => setConfigLoaded(true));
   }, []);
+
+  useEffect(() => {
+    if (!configLoaded || roomKeyRequired || joined || isJoining || !nickname || autoJoinAttemptedRef.current) return;
+
+    autoJoinAttemptedRef.current = true;
+    handleJoin();
+  }, [configLoaded, roomKeyRequired, joined, isJoining, nickname]);
 
   const loadAudioDevices = async () => {
     if (!navigator.mediaDevices?.enumerateDevices) return;
@@ -587,51 +594,31 @@ export default function App() {
   if (!joined) {
     return (
       <div id="login-container" className="min-h-screen bg-[#0a0a0b] flex flex-col items-center justify-center p-4 font-sans text-[#e1e1e6] overflow-hidden relative">
-        {/* Glow visual backdrops matching Elegant Dark */}
-        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-indigo-600/10 rounded-full filter blur-[120px] pointer-events-none" />
-        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-purple-600/10 rounded-full filter blur-[120px] pointer-events-none" />
-
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, ease: "easeOut" }}
-          className="w-full max-w-md bg-[#0f0f11] border border-[#1a1a1c] rounded-2xl p-8 shadow-2xl relative z-10"
+          className="w-full max-w-sm bg-[#0f0f11] border border-[#1a1a1c] rounded-xl p-7 shadow-2xl relative z-10"
         >
-          {/* Logo */}
-          <div className="flex flex-col items-center mb-8">
-            <div className="h-16 w-16 bg-gradient-to-tr from-indigo-600 via-purple-600 to-indigo-800 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-950/45 mb-4 ring-1 ring-white/10">
-              <Radio className="h-8 w-8 text-white animate-pulse" />
+          <div className="flex flex-col items-center mb-7">
+            <div className="h-14 w-14 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-950/45 mb-4 ring-1 ring-white/10">
+              <MessageCircle className="h-7 w-7 text-white" />
             </div>
             <h1 className="text-3xl font-bold tracking-tight font-display text-white mb-1">
-              Sohbet & Sesli Chat
+              SpeakWise
             </h1>
-            <p className="text-xs text-gray-500 font-medium">
-              Eşzamanlı Mesajlaşma ve Bas-Konuş WebRTC Oda Altyapısı
+            <p className="text-xs text-gray-500 font-medium text-center">
+              Tek oda, yazılı sohbet ve sesli konuşma.
             </p>
+            <div className="mt-4 flex items-center gap-2 rounded-lg border border-[#1a1a1c] bg-[#050506] px-3 py-2">
+              <div className="w-6 h-6 bg-indigo-600/20 text-indigo-300 rounded-full flex items-center justify-center text-xs font-semibold ring-1 ring-indigo-500/30">
+                {nickname.charAt(0).toUpperCase()}
+              </div>
+              <span className="text-xs font-medium text-gray-300">{nickname || "Misafir"}</span>
+            </div>
           </div>
 
-          <form onSubmit={handleJoin} className="space-y-6">
-            <div>
-              <label htmlFor="nickname-input" className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">
-                Kullanıcı Adınız (Nickname)
-              </label>
-              <div className="relative">
-                <input
-                  id="nickname-input"
-                  type="text"
-                  required
-                  maxLength={25}
-                  value={nickname}
-                  onChange={(e) => setNickname(e.target.value)}
-                  className="w-full px-4 py-3 bg-[#050506] border border-[#1a1a1c] rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-white placeholder-gray-700 transition font-medium text-sm"
-                  placeholder="Kullanıcı adınızı yazın..."
-                />
-                <div className="absolute right-3 top-3.5 flex items-center gap-1 text-xs text-indigo-400">
-                  <Sparkles className="h-4 w-4" />
-                </div>
-              </div>
-            </div>
-
+          <form onSubmit={handleJoin} className="space-y-5">
             {roomKeyRequired && (
               <div>
                 <label htmlFor="room-key-input" className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">
@@ -658,18 +645,17 @@ export default function App() {
             <button
               id="login-submit"
               type="submit"
-              disabled={isJoining}
+              disabled={isJoining || !configLoaded}
               className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 disabled:pointer-events-none text-white font-semibold rounded-xl shadow-lg shadow-indigo-600/15 transition active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer border border-indigo-500/30"
             >
               <Smile className="h-5 w-5" />
-              {isJoining ? "Bağlanıyor..." : "Odaya Bağlan"}
+              {!configLoaded ? "Hazırlanıyor..." : isJoining ? "Bağlanıyor..." : roomKeyRequired ? "Odaya Gir" : "Bağlanıyor..."}
             </button>
           </form>
 
-          <div className="mt-8 border-t border-[#1a1a1c] pt-4 flex justify-between items-center text-xs text-gray-600">
-            <span>🚀 Mesh WebRTC P2P Voice</span>
-            <span>⚡ Real-time Websocket</span>
-          </div>
+          <p className="mt-5 text-center text-[11px] text-gray-600">
+            Kullanıcı adı otomatik atanır. İçeride ayarlardan mikrofonunu seçebilirsin.
+          </p>
         </motion.div>
       </div>
     );
@@ -677,32 +663,16 @@ export default function App() {
 
   return (
     <div className="h-screen bg-[#0a0a0b] flex text-[#e1e1e6] font-sans overflow-hidden select-none">
-      {/* Server Navigation Rail (As seen in Elegant Dark theme spec) */}
-      <nav className="w-[72px] bg-[#050506] flex flex-col items-center py-4 space-y-3 border-r border-[#1a1a1c] flex-shrink-0">
-        <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white font-bold cursor-pointer hover:rounded-xl transition-all shadow-md shadow-indigo-900/35 relative group">
-          <span className="font-display text-lg">G</span>
-          <div className="absolute left-0 top-3 w-1 h-6 bg-white rounded-r-lg group-hover:h-8 transition-all"></div>
-        </div>
-        <div className="w-8 h-[2px] bg-[#1a1a1c] rounded-full"></div>
-        <div className="w-12 h-12 bg-[#1a1a1c] rounded-3xl flex items-center justify-center text-gray-400 hover:bg-indigo-600 hover:text-white cursor-pointer transition-all hover:rounded-2xl">
-          <span className="text-xs font-semibold">TR</span>
-        </div>
-        <div className="w-12 h-12 bg-[#1a1a1c] rounded-3xl flex items-center justify-center text-emerald-500 hover:bg-emerald-600 hover:text-white cursor-pointer transition-all hover:rounded-2xl">
-          <span className="text-lg font-bold">+</span>
-        </div>
-      </nav>
-
-      {/* Main Container */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top Header Bar */}
         <header className="h-14 bg-[#0f0f11] border-b border-[#1a1a1c] px-4 flex items-center justify-between z-10 flex-shrink-0">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 bg-[#1a1a1c] rounded-lg flex items-center justify-center border border-white/5 shadow">
-              <Radio className="h-4 w-4 text-indigo-400" />
+            <div className="h-8 w-8 bg-indigo-600 rounded-lg flex items-center justify-center border border-indigo-500/30 shadow">
+              <MessageCircle className="h-4 w-4 text-white" />
             </div>
             <div>
               <h2 className="text-sm font-bold font-display text-white tracking-wide uppercase">
-                Sohbet & Sesli Chat
+                SpeakWise
               </h2>
               <div className="flex items-center gap-1.5">
                 <span className="relative flex h-1.5 w-1.5">
@@ -714,7 +684,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* User profile & exit */}
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 bg-[#1a1a1c] px-3 py-1.5 rounded-lg border border-white/5">
               <div className="w-5 h-5 bg-indigo-600/20 text-indigo-300 rounded-full flex items-center justify-center text-xs font-semibold ring-1 ring-indigo-500/30">
@@ -757,20 +726,13 @@ export default function App() {
               {/* Rooms / Channels Section */}
               <div className="space-y-1">
                 <span className="block text-[10px] font-bold text-gray-500 uppercase tracking-widest pl-2 mb-2">YAZI KANALLARI</span>
-                <button
-                  onClick={() => setActiveChannel("genel")}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-semibold transition ${
-                    activeChannel === "genel"
-                      ? "bg-[#1a1a1c] text-white border border-white/5"
-                      : "text-gray-400 hover:bg-[#1a1a1c]/50 hover:text-white"
-                  }`}
-                >
+                <div className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-semibold bg-[#1a1a1c] text-white border border-white/5">
                   <span className="flex items-center gap-2">
                     <Hash className="h-4 w-4 text-gray-500" />
                     genel
                   </span>
                   <span className="text-[10px] bg-indigo-950/40 text-indigo-400 px-1.5 py-0.5 rounded font-mono border border-indigo-900/30">aktif</span>
-                </button>
+                </div>
               </div>
 
               {/* Voice Room Status & Controls */}
@@ -900,7 +862,7 @@ export default function App() {
                     <p className="text-[11px] text-gray-600 italic pl-1">Oda boş veya herkes ses kanalında.</p>
                   ) : (
                     textOnlineUsers.map((user) => (
-                      <div key={user.id} className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-[#1a1a1c] transition cursor-pointer group">
+                      <div key={user.id} className="flex items-center justify-between px-2 py-1.5 rounded bg-transparent transition group">
                         <div className="flex items-center gap-2.5 truncate">
                           <div className="relative">
                             <div className="w-7 h-7 bg-[#1a1a1c] text-gray-300 rounded-full flex items-center justify-center text-xs font-bold uppercase border border-white/5">
