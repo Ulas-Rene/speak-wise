@@ -141,10 +141,15 @@ const playStream = (userId: string, stream: MediaStream) => {
     audio = document.createElement("audio");
     audio.id = `audio-${userId}`;
     audio.autoplay = true;
+    audio.setAttribute("playsinline", "true");
+    audio.volume = 1;
     audio.style.display = "none";
     document.body.appendChild(audio);
   }
   audio.srcObject = stream;
+  audio.play().catch((err) => {
+    console.warn("Remote audio playback was blocked:", err);
+  });
 };
 
 const stopStream = (userId: string) => {
@@ -192,6 +197,7 @@ export default function App() {
   const micMonitorAudioRef = useRef<HTMLAudioElement | null>(null);
   const notificationSoundEnabledRef = useRef(true);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const pendingCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -398,6 +404,7 @@ export default function App() {
         peersRef.current.get(id)?.close();
         peersRef.current.delete(id);
       }
+      pendingCandidatesRef.current.delete(id);
       stopStream(id);
     });
 
@@ -451,38 +458,49 @@ export default function App() {
         peersRef.current.get(id)?.close();
         peersRef.current.delete(id);
       }
+      pendingCandidatesRef.current.delete(id);
       stopStream(id);
     });
 
     // WebRTC: Receive signaling offer, answer or candidate
-    socket.on("webrtc:signal", ({ sender, signal }: { sender: string; signal: any }) => {
+    socket.on("webrtc:signal", async ({ sender, signal }: { sender: string; signal: any }) => {
       let pc = peersRef.current.get(sender);
 
-      if (signal.type === "offer") {
-        console.log(`[WebRTC] Received offer from ${sender}`);
-        pc = createPeerConnection(sender, false);
-        pc.setRemoteDescription(new RTCSessionDescription(signal.offer))
-          .then(() => pc!.createAnswer())
-          .then((answer) => pc!.setLocalDescription(answer))
-          .then(() => {
-            socket.emit("webrtc:signal", {
-              target: sender,
-              signal: { type: "answer", answer: pc!.localDescription }
-            });
-          })
-          .catch((err) => console.error("[WebRTC] Error handling offer:", err));
-      } else if (signal.type === "answer") {
-        console.log(`[WebRTC] Received answer from ${sender}`);
-        if (pc) {
-          pc.setRemoteDescription(new RTCSessionDescription(signal.answer))
-            .catch((err) => console.error("[WebRTC] Error setting remote answer:", err));
+      try {
+        if (signal.type === "offer") {
+          console.log(`[WebRTC] Received offer from ${sender}`);
+          pc = createPeerConnection(sender, false);
+          await pc.setRemoteDescription(new RTCSessionDescription(signal.offer));
+
+          const queuedCandidates = pendingCandidatesRef.current.get(sender) || [];
+          for (const candidate of queuedCandidates) {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          }
+          pendingCandidatesRef.current.delete(sender);
+
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          socket.emit("webrtc:signal", {
+            target: sender,
+            signal: { type: "answer", answer: pc.localDescription }
+          });
+        } else if (signal.type === "answer") {
+          console.log(`[WebRTC] Received answer from ${sender}`);
+          if (pc) {
+            await pc.setRemoteDescription(new RTCSessionDescription(signal.answer));
+          }
+        } else if (signal.type === "candidate" && signal.candidate) {
+          console.log(`[WebRTC] Received ICE candidate from ${sender}`);
+          if (pc?.remoteDescription) {
+            await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+          } else {
+            const queuedCandidates = pendingCandidatesRef.current.get(sender) || [];
+            queuedCandidates.push(signal.candidate);
+            pendingCandidatesRef.current.set(sender, queuedCandidates);
+          }
         }
-      } else if (signal.type === "candidate") {
-        console.log(`[WebRTC] Received ICE candidate from ${sender}`);
-        if (pc && signal.candidate) {
-          pc.addIceCandidate(new RTCIceCandidate(signal.candidate))
-            .catch((err) => console.error("[WebRTC] Error adding ICE candidate:", err));
-        }
+      } catch (err) {
+        console.error("[WebRTC] Signal handling error:", err);
       }
     });
   };
@@ -633,13 +651,6 @@ export default function App() {
       }
 
       playAudioCue("join");
-
-      // For every other online user currently in voice channel, initiate a WebRTC call
-      users.forEach((otherUser) => {
-        if (otherUser.inVoice && otherUser.id !== socketRef.current?.id) {
-          createPeerConnection(otherUser.id, true);
-        }
-      });
     } catch (err) {
       console.error("Microphone access error:", err);
       setVoiceError(getMicrophoneErrorMessage(err));
@@ -772,6 +783,7 @@ export default function App() {
       stopStream(userId);
     });
     peersRef.current.clear();
+    pendingCandidatesRef.current.clear();
 
     playAudioCue("leave");
   };
