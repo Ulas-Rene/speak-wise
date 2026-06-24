@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: speakwise
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MAX_USERS
+        value: "10"
+      - key: MAX_MESSAGES_HISTORY
+        value: "100"
+      - key: MESSAGE_RATE_LIMIT_MS
+        value: "650"

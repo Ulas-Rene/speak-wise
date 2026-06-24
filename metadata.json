@@ -1,0 +1,5 @@
+{
+  "name": "Sohbet ve Sesli Chat",
+  "description": "Teams ve Discord benzeri, anlık yazılı ve bas-konuş sesli sohbet web uygulaması.",
+  "requestFramePermissions": ["microphone"]
+}
