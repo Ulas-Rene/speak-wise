@@ -15,9 +15,13 @@ import {
   Radio, 
   Smile, 
   Sparkles,
-  Crown
+  Crown,
+  Settings,
+  X
 } from "lucide-react";
 import { User as UserType, Message } from "./types";
+
+type NoiseSuppressionLevel = "off" | "low" | "medium" | "high";
 
 // Standard WebRTC ICE configuration with public Google STUN servers
 const iceConfiguration = {
@@ -33,6 +37,21 @@ const RANDOM_NICKNAMES = [
   "SiberGezgin", "GölgeEfendisi", "FırtınaKıran", "YazılımGeliştirici",
   "BulutMühendisi", "KriptoKralı", "AlfaGamer", "KuantumLideri"
 ];
+
+const getAudioConstraints = (
+  selectedMicId: string,
+  noiseSuppressionLevel: NoiseSuppressionLevel
+): MediaTrackConstraints => {
+  const processingEnabled = noiseSuppressionLevel !== "off";
+
+  return {
+    deviceId: selectedMicId ? { exact: selectedMicId } : undefined,
+    echoCancellation: processingEnabled,
+    noiseSuppression: processingEnabled,
+    autoGainControl: noiseSuppressionLevel === "medium" || noiseSuppressionLevel === "high",
+    channelCount: 1,
+  };
+};
 
 // Helper to play synthesized connect/disconnect audio cues (resembling Discord sounds)
 const playAudioCue = (type: "join" | "leave" | "msg") => {
@@ -111,6 +130,10 @@ export default function App() {
   const [roomKeyRequired, setRoomKeyRequired] = useState(false);
   const [joinError, setJoinError] = useState("");
   const [isJoining, setIsJoining] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedMicId, setSelectedMicId] = useState("");
+  const [noiseSuppressionLevel, setNoiseSuppressionLevel] = useState<NoiseSuppressionLevel>("medium");
 
   // Refs
   const socketRef = useRef<Socket | null>(null);
@@ -133,6 +156,30 @@ export default function App() {
       .then((config) => setRoomKeyRequired(Boolean(config.roomKeyRequired)))
       .catch(() => setRoomKeyRequired(false));
   }, []);
+
+  const loadAudioDevices = async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const microphones = devices.filter((device) => device.kind === "audioinput");
+      setAudioDevices(microphones);
+
+      if (!selectedMicId && microphones[0]?.deviceId) {
+        setSelectedMicId(microphones[0].deviceId);
+      }
+    } catch (err) {
+      console.warn("Audio device list could not be loaded:", err);
+    }
+  };
+
+  useEffect(() => {
+    loadAudioDevices();
+
+    if (!navigator.mediaDevices) return;
+    navigator.mediaDevices.addEventListener?.("devicechange", loadAudioDevices);
+    return () => navigator.mediaDevices.removeEventListener?.("devicechange", loadAudioDevices);
+  }, [selectedMicId]);
 
   // Scroll chats to bottom
   useEffect(() => {
@@ -394,12 +441,23 @@ export default function App() {
   };
 
   // Connect Local Microphone Stream and Join Room Voice
-  const connectVoice = async () => {
+  const connectVoice = async (
+    micId = selectedMicId,
+    suppressionLevel = noiseSuppressionLevel,
+    startMuted = false
+  ) => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: getAudioConstraints(micId, suppressionLevel),
+        video: false
+      });
       localStreamRef.current = stream;
       setLocalStream(stream);
-      setIsMuted(false);
+      stream.getAudioTracks().forEach((track) => {
+        track.enabled = !startMuted;
+      });
+      setIsMuted(startMuted);
+      loadAudioDevices();
 
       if (socketRef.current) {
         socketRef.current.emit("voice:join");
@@ -417,6 +475,27 @@ export default function App() {
       console.error("Microphone access error:", err);
       alert("Mikrofona erişilemedi! Lütfen izinlerinizi kontrol edin.");
     }
+  };
+
+  const restartVoiceWithSettings = async (
+    micId = selectedMicId,
+    suppressionLevel = noiseSuppressionLevel
+  ) => {
+    if (!localStreamRef.current) return;
+
+    const wasMuted = isMuted;
+    disconnectVoice();
+    await connectVoice(micId, suppressionLevel, wasMuted);
+  };
+
+  const handleMicSelection = (micId: string) => {
+    setSelectedMicId(micId);
+    restartVoiceWithSettings(micId, noiseSuppressionLevel);
+  };
+
+  const handleNoiseSuppressionChange = (level: NoiseSuppressionLevel) => {
+    setNoiseSuppressionLevel(level);
+    restartVoiceWithSettings(selectedMicId, level);
   };
 
   // Mute / Unmute Local Microphone Stream
@@ -645,6 +724,18 @@ export default function App() {
                 {nickname}
               </span>
             </div>
+
+            <button
+              id="settings-button"
+              onClick={() => {
+                setSettingsOpen(true);
+                loadAudioDevices();
+              }}
+              title="Ayarlar"
+              className="p-2 bg-[#1a1a1c] hover:bg-[#252528] text-gray-400 hover:text-white rounded-lg transition active:scale-95 cursor-pointer border border-[#1a1a1c] hover:border-white/10"
+            >
+              <Settings className="h-4 w-4" />
+            </button>
 
             <button
               id="logout-button"
@@ -975,6 +1066,124 @@ export default function App() {
           </section>
         </div>
       </div>
+
+      <AnimatePresence>
+        {settingsOpen && (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 12 }}
+              transition={{ duration: 0.16 }}
+              className="w-full max-w-md rounded-xl border border-[#1f1f23] bg-[#0f0f11] shadow-2xl"
+            >
+              <div className="flex items-center justify-between border-b border-[#1a1a1c] px-5 py-4">
+                <div>
+                  <h3 className="text-sm font-bold text-white">Ayarlar</h3>
+                  <p className="text-xs text-gray-500">Mikrofon ve ses işleme</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSettingsOpen(false)}
+                  title="Kapat"
+                  className="rounded-lg border border-[#1a1a1c] bg-[#1a1a1c] p-2 text-gray-400 transition hover:border-white/10 hover:bg-[#252528] hover:text-white"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="space-y-5 p-5">
+                <div>
+                  <label htmlFor="microphone-select" className="mb-2 block text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                    Mikrofon
+                  </label>
+                  <select
+                    id="microphone-select"
+                    value={selectedMicId}
+                    onChange={(event) => handleMicSelection(event.target.value)}
+                    className="w-full rounded-lg border border-[#1a1a1c] bg-[#050506] px-3 py-2.5 text-sm font-medium text-white outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30"
+                  >
+                    {audioDevices.length === 0 ? (
+                      <option value="">Varsayılan mikrofon</option>
+                    ) : (
+                      audioDevices.map((device, index) => (
+                        <option key={device.deviceId || index} value={device.deviceId}>
+                          {device.label || `Mikrofon ${index + 1}`}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </div>
+
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                      Gürültü Önleme
+                    </span>
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-indigo-400">
+                      {noiseSuppressionLevel === "off"
+                        ? "Kapalı"
+                        : noiseSuppressionLevel === "low"
+                          ? "Az"
+                          : noiseSuppressionLevel === "medium"
+                            ? "Orta"
+                            : "Çok"}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-1 rounded-lg border border-[#1a1a1c] bg-[#050506] p-1">
+                    {([
+                      ["off", "Kapalı"],
+                      ["low", "Az"],
+                      ["medium", "Orta"],
+                      ["high", "Çok"],
+                    ] as const).map(([level, label]) => (
+                      <button
+                        key={level}
+                        type="button"
+                        onClick={() => handleNoiseSuppressionChange(level)}
+                        className={`rounded-md px-2 py-2 text-xs font-semibold transition ${
+                          noiseSuppressionLevel === level
+                            ? "bg-indigo-600 text-white shadow-sm"
+                            : "text-gray-400 hover:bg-[#1a1a1c] hover:text-white"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-[#1a1a1c] bg-[#0a0a0b] px-3 py-3">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-gray-300">Echo engelleme</span>
+                    <span className={noiseSuppressionLevel === "off" ? "text-gray-500" : "text-emerald-400"}>
+                      {noiseSuppressionLevel === "off" ? "Kapalı" : "Açık"}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between text-xs">
+                    <span className="font-semibold text-gray-300">Otomatik ses dengesi</span>
+                    <span className={noiseSuppressionLevel === "medium" || noiseSuppressionLevel === "high" ? "text-emerald-400" : "text-gray-500"}>
+                      {noiseSuppressionLevel === "medium" || noiseSuppressionLevel === "high" ? "Açık" : "Kapalı"}
+                    </span>
+                  </div>
+                </div>
+
+                {localStream && (
+                  <div className="rounded-lg border border-emerald-900/30 bg-emerald-950/10 px-3 py-2 text-xs font-medium text-emerald-300">
+                    Ses bağlıyken değişiklikler otomatik yeniden bağlanarak uygulanır.
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
