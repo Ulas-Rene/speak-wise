@@ -43,12 +43,30 @@ const getAudioConstraints = (
   const processingEnabled = noiseSuppressionLevel !== "off";
 
   return {
-    deviceId: selectedMicId ? { exact: selectedMicId } : undefined,
+    ...(selectedMicId ? { deviceId: { ideal: selectedMicId } } : {}),
     echoCancellation: processingEnabled,
     noiseSuppression: processingEnabled,
     autoGainControl: noiseSuppressionLevel === "medium" || noiseSuppressionLevel === "high",
     channelCount: 1,
   };
+};
+
+const getMicrophoneErrorMessage = (err: unknown) => {
+  const errorName = err instanceof DOMException ? err.name : "";
+
+  if (errorName === "NotAllowedError" || errorName === "SecurityError") {
+    return "Tarayıcı mikrofon iznini kapatmış. Adres çubuğundaki kilit simgesinden mikrofonu izinli yap.";
+  }
+
+  if (errorName === "NotFoundError" || errorName === "DevicesNotFoundError") {
+    return "Mikrofon bulunamadı. Kulaklığı veya mikrofonu takıp tekrar dene.";
+  }
+
+  if (errorName === "NotReadableError" || errorName === "TrackStartError") {
+    return "Mikrofon başka bir uygulama tarafından kullanılıyor olabilir.";
+  }
+
+  return "Mikrofon açılamadı. Varsayılan cihazı kontrol edip tekrar dene.";
 };
 
 // Helper to play synthesized connect/disconnect audio cues (resembling Discord sounds)
@@ -132,6 +150,7 @@ export default function App() {
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedMicId, setSelectedMicId] = useState("");
   const [noiseSuppressionLevel, setNoiseSuppressionLevel] = useState<NoiseSuppressionLevel>("medium");
+  const [voiceError, setVoiceError] = useState("");
   const autoJoinAttemptedRef = useRef(false);
 
   // Refs
@@ -447,6 +466,46 @@ export default function App() {
     return pc;
   };
 
+  const requestMicrophoneStream = async (
+    micId: string,
+    suppressionLevel: NoiseSuppressionLevel
+  ) => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new DOMException("Media devices are not supported", "NotFoundError");
+    }
+
+    const attempts: MediaStreamConstraints[] = [
+      {
+        audio: getAudioConstraints(micId, suppressionLevel),
+        video: false
+      },
+      {
+        audio: getAudioConstraints("", suppressionLevel),
+        video: false
+      },
+      {
+        audio: true,
+        video: false
+      }
+    ];
+
+    let lastError: unknown;
+
+    for (const constraints of attempts) {
+      try {
+        return await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err) {
+        lastError = err;
+        const errorName = err instanceof DOMException ? err.name : "";
+        if (errorName === "NotAllowedError" || errorName === "SecurityError") {
+          throw err;
+        }
+      }
+    }
+
+    throw lastError;
+  };
+
   // Connect Local Microphone Stream and Join Room Voice
   const connectVoice = async (
     micId = selectedMicId,
@@ -454,12 +513,14 @@ export default function App() {
     startMuted = false
   ) => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: getAudioConstraints(micId, suppressionLevel),
-        video: false
-      });
+      setVoiceError("");
+      const stream = await requestMicrophoneStream(micId, suppressionLevel);
+      const actualMicId = stream.getAudioTracks()[0]?.getSettings().deviceId;
       localStreamRef.current = stream;
       setLocalStream(stream);
+      if (actualMicId) {
+        setSelectedMicId(actualMicId);
+      }
       stream.getAudioTracks().forEach((track) => {
         track.enabled = !startMuted;
       });
@@ -480,7 +541,7 @@ export default function App() {
       });
     } catch (err) {
       console.error("Microphone access error:", err);
-      alert("Mikrofona erişilemedi! Lütfen izinlerinizi kontrol edin.");
+      setVoiceError(getMicrophoneErrorMessage(err));
     }
   };
 
@@ -529,6 +590,7 @@ export default function App() {
     }
     setLocalStream(null);
     setIsMuted(false);
+    setVoiceError("");
 
     // Close and remove all Peer Connections
     peersRef.current.forEach((pc, userId) => {
@@ -805,6 +867,12 @@ export default function App() {
                     <Volume2 className="h-4 w-4" />
                     Sese Bağlan
                   </button>
+                )}
+
+                {voiceError && (
+                  <div className="rounded-lg border border-red-900/35 bg-red-950/15 px-3 py-2 text-[11px] font-medium leading-relaxed text-red-300">
+                    {voiceError}
+                  </div>
                 )}
               </div>
 
