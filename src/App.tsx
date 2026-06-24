@@ -62,12 +62,13 @@ const RANDOM_NICKNAMES = [
 
 const getAudioConstraints = (
   selectedMicId: string,
-  noiseSuppressionLevel: NoiseSuppressionLevel
+  noiseSuppressionLevel: NoiseSuppressionLevel,
+  deviceMode: "ideal" | "exact" = "ideal"
 ): MediaTrackConstraints => {
   const processingEnabled = noiseSuppressionLevel !== "off";
 
   return {
-    ...(selectedMicId ? { deviceId: { ideal: selectedMicId } } : {}),
+    ...(selectedMicId ? { deviceId: { [deviceMode]: selectedMicId } } : {}),
     echoCancellation: processingEnabled,
     noiseSuppression: processingEnabled,
     autoGainControl: noiseSuppressionLevel === "medium" || noiseSuppressionLevel === "high",
@@ -173,6 +174,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedMicId, setSelectedMicId] = useState("");
+  const [activeMicLabel, setActiveMicLabel] = useState("");
   const [noiseSuppressionLevel, setNoiseSuppressionLevel] = useState<NoiseSuppressionLevel>("medium");
   const [voiceError, setVoiceError] = useState("");
   const [nicknameDraft, setNicknameDraft] = useState("");
@@ -554,11 +556,26 @@ export default function App() {
       throw new DOMException("Media devices are not supported", "NotFoundError");
     }
 
-    const attempts: MediaStreamConstraints[] = [
-      {
-        audio: getAudioConstraints(micId, suppressionLevel),
-        video: false
-      },
+    const attempts: MediaStreamConstraints[] = [];
+
+    if (micId) {
+      attempts.push(
+        {
+          audio: getAudioConstraints(micId, suppressionLevel, "exact"),
+          video: false
+        },
+        {
+          audio: { deviceId: { exact: micId } },
+          video: false
+        },
+        {
+          audio: getAudioConstraints(micId, suppressionLevel, "ideal"),
+          video: false
+        }
+      );
+    }
+
+    attempts.push(
       {
         audio: getAudioConstraints("", suppressionLevel),
         video: false
@@ -567,7 +584,7 @@ export default function App() {
         audio: true,
         video: false
       }
-    ];
+    );
 
     let lastError: unknown;
 
@@ -596,10 +613,14 @@ export default function App() {
       setVoiceError("");
       const stream = await requestMicrophoneStream(micId, suppressionLevel);
       const actualMicId = stream.getAudioTracks()[0]?.getSettings().deviceId;
+      const actualTrackLabel = stream.getAudioTracks()[0]?.label;
       localStreamRef.current = stream;
       setLocalStream(stream);
       if (actualMicId) {
         setSelectedMicId(actualMicId);
+      }
+      if (actualTrackLabel) {
+        setActiveMicLabel(actualTrackLabel);
       }
       stream.getAudioTracks().forEach((track) => {
         track.enabled = !startMuted;
@@ -702,6 +723,14 @@ export default function App() {
       micMonitorAudioRef.current = audio;
       micMonitorStreamRef.current = stream;
       setMicMonitorEnabled(true);
+      const actualMicId = stream.getAudioTracks()[0]?.getSettings().deviceId;
+      const actualTrackLabel = stream.getAudioTracks()[0]?.label;
+      if (actualMicId) {
+        setSelectedMicId(actualMicId);
+      }
+      if (actualTrackLabel) {
+        setActiveMicLabel(actualTrackLabel);
+      }
       loadAudioDevices();
     } catch (err) {
       console.error("Microphone monitor error:", err);
@@ -735,6 +764,7 @@ export default function App() {
     setLocalStream(null);
     setIsMuted(false);
     setVoiceError("");
+    setActiveMicLabel("");
 
     // Close and remove all Peer Connections
     peersRef.current.forEach((pc, userId) => {
@@ -1330,6 +1360,9 @@ export default function App() {
                       ))
                     )}
                   </select>
+                  <p className="mt-2 text-[11px] text-gray-600">
+                    Aktif: {activeMicLabel || "Henüz mikrofon açılmadı"}
+                  </p>
                 </div>
 
                 <div className="rounded-lg border border-[#1a1a1c] bg-[#0a0a0b] px-3 py-3">
