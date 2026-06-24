@@ -23,10 +23,41 @@ import {
 import { User as UserType, Message } from "./types";
 
 type NoiseSuppressionLevel = "off" | "low" | "medium" | "high";
+type VoiceQualityProfile = "stable" | "balanced" | "quality";
 
 const STORAGE_KEYS = {
   nickname: "speakwise:nickname",
   notificationSound: "speakwise:notificationSound",
+  voiceQualityProfile: "speakwise:voiceQualityProfile",
+};
+
+const VOICE_QUALITY_SETTINGS: Record<
+  VoiceQualityProfile,
+  {
+    label: string;
+    bitrate: number;
+    sampleRate: number;
+    dtx: boolean;
+  }
+> = {
+  stable: {
+    label: "Stabil",
+    bitrate: 32000,
+    sampleRate: 48000,
+    dtx: true,
+  },
+  balanced: {
+    label: "Dengeli",
+    bitrate: 64000,
+    sampleRate: 48000,
+    dtx: true,
+  },
+  quality: {
+    label: "Kaliteli",
+    bitrate: 96000,
+    sampleRate: 48000,
+    dtx: false,
+  },
 };
 
 const getSavedValue = (key: string) => {
@@ -63,9 +94,11 @@ const RANDOM_NICKNAMES = [
 const getAudioConstraints = (
   selectedMicId: string,
   noiseSuppressionLevel: NoiseSuppressionLevel,
+  voiceQualityProfile: VoiceQualityProfile,
   deviceMode: "ideal" | "exact" = "ideal"
 ): MediaTrackConstraints => {
   const processingEnabled = noiseSuppressionLevel !== "off";
+  const qualitySettings = VOICE_QUALITY_SETTINGS[voiceQualityProfile];
 
   return {
     ...(selectedMicId ? { deviceId: { [deviceMode]: selectedMicId } } : {}),
@@ -73,6 +106,8 @@ const getAudioConstraints = (
     noiseSuppression: processingEnabled,
     autoGainControl: noiseSuppressionLevel === "medium" || noiseSuppressionLevel === "high",
     channelCount: 1,
+    sampleRate: qualitySettings.sampleRate,
+    sampleSize: 16,
   };
 };
 
@@ -181,6 +216,7 @@ export default function App() {
   const [selectedMicId, setSelectedMicId] = useState("");
   const [activeMicLabel, setActiveMicLabel] = useState("");
   const [noiseSuppressionLevel, setNoiseSuppressionLevel] = useState<NoiseSuppressionLevel>("medium");
+  const [voiceQualityProfile, setVoiceQualityProfile] = useState<VoiceQualityProfile>("balanced");
   const [voiceError, setVoiceError] = useState("");
   const [nicknameDraft, setNicknameDraft] = useState("");
   const [nicknameSaved, setNicknameSaved] = useState(false);
@@ -196,6 +232,7 @@ export default function App() {
   const micMonitorStreamRef = useRef<MediaStream | null>(null);
   const micMonitorAudioRef = useRef<HTMLAudioElement | null>(null);
   const notificationSoundEnabledRef = useRef(true);
+  const voiceQualityProfileRef = useRef<VoiceQualityProfile>("balanced");
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const pendingCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const chatEndRef = useRef<HTMLDivElement | null>(null);
@@ -208,10 +245,14 @@ export default function App() {
     const randomNum = Math.floor(1000 + Math.random() * 9000);
     const initialNickname = savedNickname || `${randomPick}#${randomNum}`;
     const savedNotificationSound = getSavedValue(STORAGE_KEYS.notificationSound);
+    const savedVoiceQualityProfile = getSavedValue(STORAGE_KEYS.voiceQualityProfile) as VoiceQualityProfile | null;
 
     setNickname(initialNickname);
     setNicknameDraft(initialNickname);
     setNotificationSoundEnabled(savedNotificationSound !== "false");
+    if (savedVoiceQualityProfile && savedVoiceQualityProfile in VOICE_QUALITY_SETTINGS) {
+      setVoiceQualityProfile(savedVoiceQualityProfile);
+    }
   }, []);
 
   useEffect(() => {
@@ -222,6 +263,11 @@ export default function App() {
     notificationSoundEnabledRef.current = notificationSoundEnabled;
     setSavedValue(STORAGE_KEYS.notificationSound, String(notificationSoundEnabled));
   }, [notificationSoundEnabled]);
+
+  useEffect(() => {
+    voiceQualityProfileRef.current = voiceQualityProfile;
+    setSavedValue(STORAGE_KEYS.voiceQualityProfile, voiceQualityProfile);
+  }, [voiceQualityProfile]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -515,10 +561,52 @@ export default function App() {
     const pc = new RTCPeerConnection(iceConfiguration);
     peersRef.current.set(targetUserId, pc);
 
+    const applySenderQuality = async (sender: RTCRtpSender) => {
+      const qualitySettings = VOICE_QUALITY_SETTINGS[voiceQualityProfileRef.current];
+
+      try {
+        const parameters = sender.getParameters();
+        parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+        parameters.encodings[0] = {
+          ...parameters.encodings[0],
+          maxBitrate: qualitySettings.bitrate,
+          priority: "high",
+          networkPriority: "high",
+        };
+
+        if (parameters.codecs) {
+          parameters.codecs = parameters.codecs.map((codec) => {
+            if (!codec.mimeType.toLowerCase().includes("opus")) return codec;
+
+            const fmtp = [
+              codec.sdpFmtpLine,
+              `maxaveragebitrate=${qualitySettings.bitrate}`,
+              "useinbandfec=1",
+              `usedtx=${qualitySettings.dtx ? 1 : 0}`,
+            ]
+              .filter(Boolean)
+              .join(";");
+
+            return {
+              ...codec,
+              sdpFmtpLine: fmtp,
+            };
+          });
+        }
+
+        await sender.setParameters(parameters);
+      } catch (err) {
+        console.warn("[WebRTC] Audio sender quality parameters were not applied:", err);
+      }
+    };
+
     // Add local mic track
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => {
-        pc.addTrack(track, localStreamRef.current!);
+        const sender = pc.addTrack(track, localStreamRef.current!);
+        if (track.kind === "audio") {
+          applySenderQuality(sender);
+        }
       });
     }
 
@@ -541,26 +629,39 @@ export default function App() {
       }
     };
 
+    const sendOffer = async (iceRestart = false) => {
+      if (!socketRef.current) return;
+
+      try {
+        const offer = await pc.createOffer({ offerToReceiveAudio: true, iceRestart });
+        await pc.setLocalDescription(offer);
+        socketRef.current.emit("webrtc:signal", {
+          target: targetUserId,
+          signal: { type: "offer", offer: pc.localDescription }
+        });
+      } catch (err) {
+        console.error("[WebRTC] Error creating offer:", err);
+      }
+    };
+
     // Connection cleanup logging
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "disconnected" || pc.connectionState === "failed" || pc.connectionState === "closed") {
+      if (pc.connectionState === "failed" && isInitiator) {
+        window.setTimeout(() => {
+          if (peersRef.current.get(targetUserId) === pc && pc.connectionState === "failed") {
+            sendOffer(true);
+          }
+        }, 800);
+      }
+
+      if (pc.connectionState === "closed") {
         stopStream(targetUserId);
       }
     };
 
     // If we are initiating the mesh call, generate and send WebRTC offer
     if (isInitiator) {
-      pc.createOffer({ offerToReceiveAudio: true })
-        .then((offer) => pc.setLocalDescription(offer))
-        .then(() => {
-          if (socketRef.current) {
-            socketRef.current.emit("webrtc:signal", {
-              target: targetUserId,
-              signal: { type: "offer", offer: pc.localDescription }
-            });
-          }
-        })
-        .catch((err) => console.error("[WebRTC] Error creating offer:", err));
+      sendOffer();
     }
 
     return pc;
@@ -568,7 +669,8 @@ export default function App() {
 
   const requestMicrophoneStream = async (
     micId: string,
-    suppressionLevel: NoiseSuppressionLevel
+    suppressionLevel: NoiseSuppressionLevel,
+    qualityProfile: VoiceQualityProfile
   ) => {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new DOMException("Media devices are not supported", "NotFoundError");
@@ -579,7 +681,7 @@ export default function App() {
     if (micId) {
       attempts.push(
         {
-          audio: getAudioConstraints(micId, suppressionLevel, "exact"),
+          audio: getAudioConstraints(micId, suppressionLevel, qualityProfile, "exact"),
           video: false
         },
         {
@@ -587,7 +689,7 @@ export default function App() {
           video: false
         },
         {
-          audio: getAudioConstraints(micId, suppressionLevel, "ideal"),
+          audio: getAudioConstraints(micId, suppressionLevel, qualityProfile, "ideal"),
           video: false
         }
       );
@@ -595,7 +697,7 @@ export default function App() {
 
     attempts.push(
       {
-        audio: getAudioConstraints("", suppressionLevel),
+        audio: getAudioConstraints("", suppressionLevel, qualityProfile),
         video: false
       },
       {
@@ -625,11 +727,12 @@ export default function App() {
   const connectVoice = async (
     micId = selectedMicId,
     suppressionLevel = noiseSuppressionLevel,
+    qualityProfile = voiceQualityProfile,
     startMuted = false
   ) => {
     try {
       setVoiceError("");
-      const stream = await requestMicrophoneStream(micId, suppressionLevel);
+      const stream = await requestMicrophoneStream(micId, suppressionLevel, qualityProfile);
       const actualMicId = stream.getAudioTracks()[0]?.getSettings().deviceId;
       const actualTrackLabel = stream.getAudioTracks()[0]?.label;
       localStreamRef.current = stream;
@@ -659,25 +762,32 @@ export default function App() {
 
   const restartVoiceWithSettings = async (
     micId = selectedMicId,
-    suppressionLevel = noiseSuppressionLevel
+    suppressionLevel = noiseSuppressionLevel,
+    qualityProfile = voiceQualityProfile
   ) => {
     if (!localStreamRef.current) return;
 
     const wasMuted = isMuted;
     disconnectVoice();
-    await connectVoice(micId, suppressionLevel, wasMuted);
+    await connectVoice(micId, suppressionLevel, qualityProfile, wasMuted);
   };
 
   const handleMicSelection = (micId: string) => {
     stopMicMonitor();
     setSelectedMicId(micId);
-    restartVoiceWithSettings(micId, noiseSuppressionLevel);
+    restartVoiceWithSettings(micId, noiseSuppressionLevel, voiceQualityProfile);
   };
 
   const handleNoiseSuppressionChange = (level: NoiseSuppressionLevel) => {
     stopMicMonitor();
     setNoiseSuppressionLevel(level);
-    restartVoiceWithSettings(selectedMicId, level);
+    restartVoiceWithSettings(selectedMicId, level, voiceQualityProfile);
+  };
+
+  const handleVoiceQualityChange = (profile: VoiceQualityProfile) => {
+    stopMicMonitor();
+    setVoiceQualityProfile(profile);
+    restartVoiceWithSettings(selectedMicId, noiseSuppressionLevel, profile);
   };
 
   const closeSettings = () => {
@@ -722,7 +832,7 @@ export default function App() {
 
     try {
       setMicMonitorError("");
-      const stream = await requestMicrophoneStream(selectedMicId, noiseSuppressionLevel);
+      const stream = await requestMicrophoneStream(selectedMicId, noiseSuppressionLevel, voiceQualityProfile);
       const audio = document.createElement("audio");
       audio.autoplay = true;
       audio.controls = false;
@@ -1048,7 +1158,7 @@ export default function App() {
                 ) : (
                   <button
                     id="voice-connect-button"
-                    onClick={connectVoice}
+                    onClick={() => connectVoice()}
                     className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded transition flex items-center justify-center gap-1.5 shadow-md shadow-indigo-950/20 active:scale-[0.98] cursor-pointer border border-indigo-500/30"
                   >
                     <Volume2 className="h-4 w-4" />
@@ -1445,6 +1555,41 @@ export default function App() {
                       </button>
                     ))}
                   </div>
+                </div>
+
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                      Ses Kalitesi
+                    </span>
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-indigo-400">
+                      {VOICE_QUALITY_SETTINGS[voiceQualityProfile].label}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-1 rounded-lg border border-[#1a1a1c] bg-[#050506] p-1">
+                    {([
+                      ["stable", "Stabil"],
+                      ["balanced", "Dengeli"],
+                      ["quality", "Kaliteli"],
+                    ] as const).map(([profile, label]) => (
+                      <button
+                        key={profile}
+                        type="button"
+                        onClick={() => handleVoiceQualityChange(profile)}
+                        className={`rounded-md px-2 py-2 text-xs font-semibold transition ${
+                          voiceQualityProfile === profile
+                            ? "bg-indigo-600 text-white shadow-sm"
+                            : "text-gray-400 hover:bg-[#1a1a1c] hover:text-white"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-[11px] leading-relaxed text-gray-600">
+                    Kaliteli mod daha net ses verir; Stabil mod zayıf bağlantıda kesilmeyi azaltır.
+                  </p>
                 </div>
 
                 <div className="rounded-lg border border-[#1a1a1c] bg-[#0a0a0b] px-3 py-3">
