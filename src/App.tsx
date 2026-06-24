@@ -15,11 +15,35 @@ import {
   Crown,
   Settings,
   X,
-  MessageCircle
+  MessageCircle,
+  Bell,
+  Play,
+  Square
 } from "lucide-react";
 import { User as UserType, Message } from "./types";
 
 type NoiseSuppressionLevel = "off" | "low" | "medium" | "high";
+
+const STORAGE_KEYS = {
+  nickname: "speakwise:nickname",
+  notificationSound: "speakwise:notificationSound",
+};
+
+const getSavedValue = (key: string) => {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+
+const setSavedValue = (key: string, value: string) => {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Local storage can be unavailable in private or locked-down browser modes.
+  }
+};
 
 // Standard WebRTC ICE configuration with public Google STUN servers
 const iceConfiguration = {
@@ -151,21 +175,60 @@ export default function App() {
   const [selectedMicId, setSelectedMicId] = useState("");
   const [noiseSuppressionLevel, setNoiseSuppressionLevel] = useState<NoiseSuppressionLevel>("medium");
   const [voiceError, setVoiceError] = useState("");
+  const [nicknameDraft, setNicknameDraft] = useState("");
+  const [nicknameSaved, setNicknameSaved] = useState(false);
+  const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(true);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [micMonitorEnabled, setMicMonitorEnabled] = useState(false);
+  const [micMonitorError, setMicMonitorError] = useState("");
   const autoJoinAttemptedRef = useRef(false);
 
   // Refs
   const socketRef = useRef<Socket | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const micMonitorStreamRef = useRef<MediaStream | null>(null);
+  const micMonitorAudioRef = useRef<HTMLAudioElement | null>(null);
+  const notificationSoundEnabledRef = useRef(true);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
 
-  // Generate random default nickname
   useEffect(() => {
+    const savedNickname = getSavedValue(STORAGE_KEYS.nickname);
     const randomPick = RANDOM_NICKNAMES[Math.floor(Math.random() * RANDOM_NICKNAMES.length)];
     const randomNum = Math.floor(1000 + Math.random() * 9000);
-    setNickname(`${randomPick}#${randomNum}`);
+    const initialNickname = savedNickname || `${randomPick}#${randomNum}`;
+    const savedNotificationSound = getSavedValue(STORAGE_KEYS.notificationSound);
+
+    setNickname(initialNickname);
+    setNicknameDraft(initialNickname);
+    setNotificationSoundEnabled(savedNotificationSound !== "false");
+  }, []);
+
+  useEffect(() => {
+    document.title = unreadCount > 0 ? `(${unreadCount}) SpeakWise` : "SpeakWise";
+  }, [unreadCount]);
+
+  useEffect(() => {
+    notificationSoundEnabledRef.current = notificationSoundEnabled;
+    setSavedValue(STORAGE_KEYS.notificationSound, String(notificationSoundEnabled));
+  }, [notificationSoundEnabled]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        setUnreadCount(0);
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleVisibilityChange);
+      document.title = "SpeakWise";
+    };
   }, []);
 
   useEffect(() => {
@@ -216,6 +279,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       disconnectVoice();
+      stopMicMonitor();
       if (socketRef.current) {
         socketRef.current.disconnect();
       }
@@ -305,6 +369,12 @@ export default function App() {
     socket.on("room:state", ({ users, messages }: { users: UserType[]; messages: Message[] }) => {
       setUsers(users);
       setMessages(messages);
+      const currentUser = users.find((user) => user.id === socket.id);
+      if (currentUser) {
+        setNickname(currentUser.nickname);
+        setNicknameDraft(currentUser.nickname);
+        setSavedValue(STORAGE_KEYS.nickname, currentUser.nickname);
+      }
       setJoined(true);
       setIsJoining(false);
       playAudioCue("join");
@@ -331,13 +401,23 @@ export default function App() {
 
     socket.on("user:updated", (updatedUser: UserType) => {
       setUsers((prev) => prev.map((u) => (u.id === updatedUser.id ? updatedUser : u)));
+      if (updatedUser.id === socket.id) {
+        setNickname(updatedUser.nickname);
+        setNicknameDraft(updatedUser.nickname);
+        setSavedValue(STORAGE_KEYS.nickname, updatedUser.nickname);
+      }
     });
 
     // Handle incoming text message
     socket.on("chat:message", (newMessage: Message) => {
       setMessages((prev) => [...prev, newMessage]);
       if (newMessage.senderId !== socket.id) {
-        playAudioCue("msg");
+        if (notificationSoundEnabledRef.current) {
+          playAudioCue("msg");
+        }
+        if (document.hidden) {
+          setUnreadCount((count) => count + 1);
+        }
       }
     });
 
@@ -557,13 +637,77 @@ export default function App() {
   };
 
   const handleMicSelection = (micId: string) => {
+    stopMicMonitor();
     setSelectedMicId(micId);
     restartVoiceWithSettings(micId, noiseSuppressionLevel);
   };
 
   const handleNoiseSuppressionChange = (level: NoiseSuppressionLevel) => {
+    stopMicMonitor();
     setNoiseSuppressionLevel(level);
     restartVoiceWithSettings(selectedMicId, level);
+  };
+
+  const closeSettings = () => {
+    stopMicMonitor();
+    setSettingsOpen(false);
+    setNicknameDraft(nickname);
+  };
+
+  const saveNickname = () => {
+    const cleanNickname = nicknameDraft.trim().replace(/\s+/g, " ").substring(0, 25);
+    if (!cleanNickname) return;
+
+    setNickname(cleanNickname);
+    setNicknameDraft(cleanNickname);
+    setSavedValue(STORAGE_KEYS.nickname, cleanNickname);
+    setNicknameSaved(true);
+    socketRef.current?.emit("user:nickname", { nickname: cleanNickname });
+    window.setTimeout(() => setNicknameSaved(false), 1400);
+  };
+
+  const stopMicMonitor = () => {
+    if (micMonitorAudioRef.current) {
+      micMonitorAudioRef.current.pause();
+      micMonitorAudioRef.current.srcObject = null;
+      micMonitorAudioRef.current.remove();
+      micMonitorAudioRef.current = null;
+    }
+
+    if (micMonitorStreamRef.current) {
+      micMonitorStreamRef.current.getTracks().forEach((track) => track.stop());
+      micMonitorStreamRef.current = null;
+    }
+
+    setMicMonitorEnabled(false);
+  };
+
+  const toggleMicMonitor = async () => {
+    if (micMonitorEnabled) {
+      stopMicMonitor();
+      return;
+    }
+
+    try {
+      setMicMonitorError("");
+      const stream = await requestMicrophoneStream(selectedMicId, noiseSuppressionLevel);
+      const audio = document.createElement("audio");
+      audio.autoplay = true;
+      audio.controls = false;
+      audio.style.display = "none";
+      audio.srcObject = stream;
+      document.body.appendChild(audio);
+      await audio.play();
+
+      micMonitorAudioRef.current = audio;
+      micMonitorStreamRef.current = stream;
+      setMicMonitorEnabled(true);
+      loadAudioDevices();
+    } catch (err) {
+      console.error("Microphone monitor error:", err);
+      setMicMonitorError(getMicrophoneErrorMessage(err));
+      stopMicMonitor();
+    }
   };
 
   // Mute / Unmute Local Microphone Stream
@@ -638,6 +782,7 @@ export default function App() {
   // Logout/Reset User
   const handleLogout = () => {
     disconnectVoice();
+    stopMicMonitor();
     if (socketRef.current) {
       socketRef.current.disconnect();
     }
@@ -1110,16 +1255,16 @@ export default function App() {
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.96, y: 12 }}
               transition={{ duration: 0.16 }}
-              className="w-full max-w-md rounded-xl border border-[#1f1f23] bg-[#0f0f11] shadow-2xl"
+              className="max-h-[92vh] w-full max-w-md overflow-hidden rounded-xl border border-[#1f1f23] bg-[#0f0f11] shadow-2xl"
             >
               <div className="flex items-center justify-between border-b border-[#1a1a1c] px-5 py-4">
                 <div>
                   <h3 className="text-sm font-bold text-white">Ayarlar</h3>
-                  <p className="text-xs text-gray-500">Mikrofon ve ses işleme</p>
+                  <p className="text-xs text-gray-500">Profil, mikrofon ve bildirimler</p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setSettingsOpen(false)}
+                  onClick={closeSettings}
                   title="Kapat"
                   className="rounded-lg border border-[#1a1a1c] bg-[#1a1a1c] p-2 text-gray-400 transition hover:border-white/10 hover:bg-[#252528] hover:text-white"
                 >
@@ -1127,7 +1272,44 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="space-y-5 p-5">
+              <div className="max-h-[calc(92vh-73px)] space-y-5 overflow-y-auto p-5">
+                <div>
+                  <label htmlFor="nickname-settings-input" className="mb-2 block text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                    Kullanıcı Adı
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      id="nickname-settings-input"
+                      type="text"
+                      maxLength={25}
+                      value={nicknameDraft}
+                      onChange={(event) => {
+                        setNicknameDraft(event.target.value);
+                        setNicknameSaved(false);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          saveNickname();
+                        }
+                      }}
+                      className="min-w-0 flex-1 rounded-lg border border-[#1a1a1c] bg-[#050506] px-3 py-2.5 text-sm font-medium text-white outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/30"
+                      placeholder="Kullanıcı adın"
+                    />
+                    <button
+                      type="button"
+                      onClick={saveNickname}
+                      disabled={!nicknameDraft.trim()}
+                      className="rounded-lg border border-indigo-500/30 bg-indigo-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-indigo-500 disabled:pointer-events-none disabled:opacity-50"
+                    >
+                      Kaydet
+                    </button>
+                  </div>
+                  <p className={`mt-2 text-[11px] ${nicknameSaved ? "text-emerald-400" : "text-gray-600"}`}>
+                    {nicknameSaved ? "Kaydedildi. Sayfayı yenilesen de kalır." : "Bu isim bu tarayıcıda saklanır."}
+                  </p>
+                </div>
+
                 <div>
                   <label htmlFor="microphone-select" className="mb-2 block text-[10px] font-bold uppercase tracking-widest text-gray-500">
                     Mikrofon
@@ -1148,6 +1330,37 @@ export default function App() {
                       ))
                     )}
                   </select>
+                </div>
+
+                <div className="rounded-lg border border-[#1a1a1c] bg-[#0a0a0b] px-3 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-semibold text-gray-300">Mikrofon testi</div>
+                      <div className="mt-1 text-[11px] text-gray-600">Kendi sesini kısa süreli dinleyebilirsin.</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={toggleMicMonitor}
+                      className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                        micMonitorEnabled
+                          ? "border border-red-900/40 bg-red-950/30 text-red-300 hover:bg-red-950/50"
+                          : "border border-emerald-900/30 bg-emerald-950/20 text-emerald-300 hover:bg-emerald-950/35"
+                      }`}
+                    >
+                      {micMonitorEnabled ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                      {micMonitorEnabled ? "Durdur" : "Dinle"}
+                    </button>
+                  </div>
+                  {micMonitorEnabled && (
+                    <div className="mt-3 rounded-md border border-amber-900/30 bg-amber-950/15 px-2.5 py-2 text-[11px] leading-relaxed text-amber-300">
+                      Hoparlörden yankı yaparsa testi durdur veya kulaklık kullan.
+                    </div>
+                  )}
+                  {micMonitorError && (
+                    <div className="mt-3 rounded-md border border-red-900/35 bg-red-950/15 px-2.5 py-2 text-[11px] leading-relaxed text-red-300">
+                      {micMonitorError}
+                    </div>
+                  )}
                 </div>
 
                 <div>
@@ -1201,6 +1414,34 @@ export default function App() {
                     <span className={noiseSuppressionLevel === "medium" || noiseSuppressionLevel === "high" ? "text-emerald-400" : "text-gray-500"}>
                       {noiseSuppressionLevel === "medium" || noiseSuppressionLevel === "high" ? "Açık" : "Kapalı"}
                     </span>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-[#1a1a1c] bg-[#0a0a0b] px-3 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-start gap-2.5">
+                      <Bell className="mt-0.5 h-4 w-4 text-indigo-400" />
+                      <div>
+                        <div className="text-xs font-semibold text-gray-300">Mesaj sesi</div>
+                        <div className="mt-1 text-[11px] leading-relaxed text-gray-600">
+                          OS bildirimi açmaz; alttab yaptırmadan sadece kısa ses çalar.
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setNotificationSoundEnabled((enabled) => !enabled)}
+                      className={`h-6 w-11 rounded-full p-0.5 transition ${
+                        notificationSoundEnabled ? "bg-indigo-600" : "bg-[#252528]"
+                      }`}
+                      aria-pressed={notificationSoundEnabled}
+                    >
+                      <span
+                        className={`block h-5 w-5 rounded-full bg-white transition ${
+                          notificationSoundEnabled ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
                   </div>
                 </div>
 

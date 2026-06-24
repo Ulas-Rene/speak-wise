@@ -103,6 +103,16 @@ async function startServer() {
       console.log(`User joined: ${cleanNickname} (${socket.id})`);
     });
 
+    socket.on("user:nickname", ({ nickname }: { nickname: string }) => {
+      const user = users.get(socket.id);
+      if (!user) return;
+
+      const cleanNickname = normalizeNickname(nickname);
+      user.nickname = cleanNickname;
+      users.set(socket.id, user);
+      io.emit("user:updated", user);
+    });
+
     socket.on("chat:message", ({ text }: { text: string }) => {
       const user = users.get(socket.id);
       if (!user) return;
